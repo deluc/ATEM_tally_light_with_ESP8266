@@ -375,6 +375,11 @@ void loop() {
                 WiFi.mode(WIFI_AP_STA); // Enable softAP to access web interface in case of no WiFi
                 setBothLEDs(LED_WHITE);
                 setStatusLED(LED_WHITE);
+            } else {
+                //Blink white while the setup WiFi is active
+                int color = millis() % 1000 < 500 ? LED_WHITE : LED_OFF;
+                setBothLEDs(color);
+                setStatusLED(color);
             }
             break;
 #ifndef TALLY_TEST_SERVER
