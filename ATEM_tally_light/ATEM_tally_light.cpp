@@ -211,12 +211,21 @@ uint8_t readByte;
 #define BATTERY_CUTOFF_SECS 10      //Seconds in a row below cutoff before shutting down
 #define BATTERY_FLASH_EVERY 5000    //ms between low battery flashes
 #define BATTERY_FLASH_LEN   400     //ms per flash
+#define BATTERY_TREND_MINS  20      //Minutes of history used for the runtime estimate
+#define BATTERY_TREND_MIN   15      //Minutes of history needed before showing an estimate
 
 unsigned long lastBatteryRead = 0;
 int batteryRaw = 0;
 float uBatt = 0;
 int batteryLowSecs = 0;
 char buffer[8];
+
+//Battery level history for the runtime estimate - one averaged value per minute
+float batteryTrend[BATTERY_TREND_MINS + 1];
+int batteryTrendCount = 0;
+int batteryTrendIndex = 0;
+float batteryMinuteSum = 0;
+int batteryMinuteSamples = 0;
 
 void onImprovWiFiErrorCb(ImprovTypes::Error err)
 {
@@ -759,6 +768,29 @@ void handleRoot() {
     html += " V (raw ";
     html += batteryRaw;
     html += ")</td></tr>";
+    if (uBatt >= BATTERY_MIN_VALID) {
+        html += "<tr><td>Battery level:</td><td colspan=\"2\">~";
+        html += (int)(batteryPercent(uBatt) + 0.5);
+        html += " % (estimated)";
+        html += infoIcon((String)"Estimated from the battery voltage using a typical Li-ion discharge curve. 0 % means the automatic shutdown at " + BATTERY_CUTOFF + " V. The voltage drops while the LEDs are bright, so the value can jump a bit.");
+        html += "</td></tr><tr><td>Remaining runtime:</td><td colspan=\"2\">";
+        int minutesLeft = batteryMinutesLeft();
+        if (minutesLeft == -1) {
+            html += "Calculating...";
+        } else if (minutesLeft == -2) {
+            html += "Not discharging";
+        } else {
+            html += "~";
+            if (minutesLeft >= 60) {
+                html += minutesLeft / 60;
+                html += " h ";
+            }
+            html += minutesLeft % 60;
+            html += " min (estimated)";
+        }
+        html += infoIcon((String)"Estimated from how fast the battery level dropped during the last " + BATTERY_TREND_MINS + " minutes, extrapolated until the automatic shutdown. Needs " + BATTERY_TREND_MIN + " minutes on battery before the first estimate. Program, preview and off use different amounts of power, so this is only a rough guide.");
+        html += "</td></tr>";
+    }
 #endif
     html += "<tr><td>Static IP:</td><td colspan=\"2\">";
     html += settings.staticIP == true ? "True" : "False";
@@ -1030,6 +1062,25 @@ void batteryLoop() {
     //Smooth the noisy ADC reading
     uBatt = uBatt < BATTERY_MIN_VALID ? u : uBatt * 0.8 + u * 0.2;
 
+    //Store the battery level averaged over each minute for the runtime estimate
+    if (uBatt >= BATTERY_MIN_VALID) {
+        batteryMinuteSum += batteryPercent(uBatt);
+        batteryMinuteSamples++;
+        if (batteryMinuteSamples >= 60) {
+            batteryTrend[batteryTrendIndex] = batteryMinuteSum / batteryMinuteSamples;
+            batteryTrendIndex = (batteryTrendIndex + 1) % (BATTERY_TREND_MINS + 1);
+            if (batteryTrendCount < BATTERY_TREND_MINS + 1) {
+                batteryTrendCount++;
+            }
+            batteryMinuteSum = 0;
+            batteryMinuteSamples = 0;
+        }
+    } else {
+        batteryTrendCount = 0;
+        batteryMinuteSum = 0;
+        batteryMinuteSamples = 0;
+    }
+
     //Turn everything off and put ESP to deepsleep if battery is too low for several seconds
     if (uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_CUTOFF) {
         batteryLowSecs++;
@@ -1056,3 +1107,42 @@ bool batteryWarning() {
     return false;
 #endif
 }
+
+#ifdef BATTERY_MONITOR
+//Estimated battery level in percent from a typical Li-ion discharge curve. 0 % is the cutoff voltage
+float batteryPercent(float u) {
+    const float volts[]   = {BATTERY_CUTOFF, 3.50, 3.60, 3.70, 3.80, 3.90, 4.00, 4.10, 4.20};
+    const float percent[] = {0,              4,    12,   28,   45,   62,   78,   90,   100};
+    const int points = sizeof(volts) / sizeof(volts[0]);
+
+    if (u <= volts[0]) {
+        return 0;
+    }
+    for (int i = 1; i < points; i++) {
+        if (u < volts[i]) {
+            return percent[i - 1] + (u - volts[i - 1]) / (volts[i] - volts[i - 1]) * (percent[i] - percent[i - 1]);
+        }
+    }
+    return 100;
+}
+
+//Estimated minutes until shutdown, extrapolated from the battery level history
+//Returns -1 while there isn't enough history yet, -2 if the battery isn't discharging
+int batteryMinutesLeft() {
+    if (batteryTrendCount < BATTERY_TREND_MIN + 1) {
+        return -1;
+    }
+    int newest = (batteryTrendIndex + BATTERY_TREND_MINS) % (BATTERY_TREND_MINS + 1);
+    int oldest = (batteryTrendIndex + BATTERY_TREND_MINS + 1 - batteryTrendCount) % (BATTERY_TREND_MINS + 1);
+    float dropPerMinute = (batteryTrend[oldest] - batteryTrend[newest]) / (batteryTrendCount - 1);
+    if (dropPerMinute <= 0.01) {
+        return -2;
+    }
+    return batteryTrend[newest] / dropPerMinute;
+}
+
+//Small info icon that shows an explanation on hover or click
+String infoIcon(String text) {
+    return " <a href=\"#\"title=\"" + text + "\"onclick=\"alert(this.title);return false\"style=\"text-decoration:none\">&#9432;</a>";
+}
+#endif

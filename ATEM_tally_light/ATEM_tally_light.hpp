@@ -72,3 +72,12 @@ void batteryLoop();
 
 //True while the low battery flash should be shown
 bool batteryWarning();
+
+//Estimated battery level in percent from a typical Li-ion discharge curve
+float batteryPercent(float u);
+
+//Estimated minutes until shutdown, -1 while calculating, -2 if not discharging
+int batteryMinutesLeft();
+
+//Small info icon that shows an explanation on hover or click
+String infoIcon(String text);
