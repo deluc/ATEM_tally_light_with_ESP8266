@@ -218,6 +218,7 @@ unsigned long lastBatteryRead = 0;
 int batteryRaw = 0;
 float uBatt = 0;
 int batteryLowSecs = 0;
+bool batteryWasOk = false;
 char buffer[8];
 
 //Battery level history for the runtime estimate - one averaged value per minute
@@ -1081,23 +1082,41 @@ void batteryLoop() {
         batteryMinuteSamples = 0;
     }
 
-    //Turn everything off and put ESP to deepsleep if battery is too low for several seconds
-    if (uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_CUTOFF) {
+    //Only shut down after the battery was seen above the cutoff once,
+    //so a wrong reading right after boot doesn't turn the tally off
+    if (uBatt > BATTERY_CUTOFF) {
+        batteryWasOk = true;
+    }
+
+    //Turn everything off if battery is too low for several seconds
+    if (batteryWasOk && uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_CUTOFF) {
         batteryLowSecs++;
         if (batteryLowSecs >= BATTERY_CUTOFF_SECS) {
-            Serial.println("------------------------");
-            Serial.println("Battery empty, going to deepsleep");
-            setBothLEDs(LED_OFF);
-            setSTRIP(LED_OFF);
-            setStatusLED(LED_OFF);
-            FastLED.show();
-            ESP.deepSleep(0, WAKE_NO_RFCAL);
+            batteryShutdown();
         }
     } else {
         batteryLowSecs = 0;
     }
 #endif
 }
+
+#ifdef BATTERY_MONITOR
+//Turn off WiFi and all LEDs and wait until the tally is switched off
+//No deepsleep, because GPIO16 (D0, red LED) stays high during deepsleep and would look like program
+void batteryShutdown() {
+    Serial.println("------------------------");
+    Serial.println("Battery empty, shutting down");
+    setBothLEDs(LED_OFF);
+    setSTRIP(LED_OFF);
+    setStatusLED(LED_OFF);
+    FastLED.show();
+    WiFi.mode(WIFI_OFF);
+    WiFi.forceSleepBegin();
+    while (true) {
+        delay(1000);
+    }
+}
+#endif
 
 //True while the low battery flash should be shown
 bool batteryWarning() {

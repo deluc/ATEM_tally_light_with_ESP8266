@@ -70,6 +70,9 @@ void setWiFi(String ssid, String pwd);
 //Battery monitoring: measure voltage once per second, shut down if empty
 void batteryLoop();
 
+//Turn off WiFi and all LEDs and wait until the tally is switched off
+void batteryShutdown();
+
 //True while the low battery flash should be shown
 bool batteryWarning();
 
