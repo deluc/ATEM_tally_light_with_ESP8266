@@ -218,6 +218,7 @@ unsigned long lastBatteryRead = 0;
 int batteryRaw = 0;
 float uBatt = 0;
 int batteryLowSecs = 0;
+bool batteryFlashOn = false;
 char buffer[8];
 
 //Battery level history for the runtime estimate - one averaged value per minute
@@ -296,6 +297,18 @@ void setup() {
     }
 
     FastLED.setBrightness(settings.neopixelBrightness);
+
+    //Show each color for a second at startup, to check that all LED channels work
+    const uint8_t testColors[] = {LED_RED, LED_GREEN, LED_BLUE, LED_WHITE};
+    for (uint8_t color : testColors) {
+        setBothLEDs(color);
+        setSTRIP(color);
+        setStatusLED(color);
+        FastLED.show();
+        delay(1000);
+    }
+    setBothLEDs(LED_BLUE);
+
     setSTRIP(LED_OFF);
     setStatusLED(LED_BLUE);
     FastLED.show();
@@ -490,6 +503,21 @@ void loop() {
 
         //Reset tally server's tally flags, They won't get the message, but it'll be reset for when the connectoin is back.
         tallyServer.resetTallyFlags();
+    }
+
+    //Flash yellow if the battery is low while waiting for WiFi or switcher (STATE_RUNNING handles this itself)
+    if (state != STATE_RUNNING) {
+        bool flash = batteryWarning();
+        if (flash) {
+            setBothLEDs(LED_YELLOW);
+            setStatusLED(LED_YELLOW);
+        } else if (batteryFlashOn) {
+            //Restore the status color after the flash (the setup WiFi blinking sets its own colors every loop)
+            uint8_t color = state == STATE_CONNECTING_TO_SWITCHER ? LED_PINK : LED_BLUE;
+            setBothLEDs(color);
+            setStatusLED(color);
+        }
+        batteryFlashOn = flash;
     }
 
     //Show strip only on updates
