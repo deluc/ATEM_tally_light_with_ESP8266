@@ -67,6 +67,8 @@ String getSSID();
 void setWiFi(String ssid, String pwd);
 
 // void improvCallback(improv::ImprovCommand d);
-//Commented out for users without batteries - Also timer is not done properly
-//Main loop for things that should work every second
-// void batteryLoop();
+//Battery monitoring: measure voltage once per second, shut down if empty
+void batteryLoop();
+
+//True while the low battery flash should be shown
+bool batteryWarning();

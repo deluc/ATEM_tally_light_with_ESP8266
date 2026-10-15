@@ -197,12 +197,26 @@ bool firstRun = true;
 int bytesAvailable = false;
 uint8_t readByte;
 
-//Commented out for users without batteries
-// long secLoop = 0;
-// int lowLedCount = 0;
-// bool lowLedOn = false;
-// double uBatt = 0;
-// char buffer[3];
+//Battery monitoring for the D1 mini battery shield (solder jumper J2 connects the battery to A0)
+//Build with -D NO_BATTERY_MONITOR to disable
+#if !defined(ESP32) && !defined(NO_BATTERY_MONITOR)
+#define BATTERY_MONITOR
+#endif
+#ifndef BATTERY_FACTOR
+#define BATTERY_FACTOR      4.5     //Voltage at raw value 1023 - calibrate with a multimeter
+#endif
+#define BATTERY_MIN_VALID   2.5     //Below this J2 is probably open, so the reading is ignored
+#define BATTERY_WARN        3.6     //Flash yellow below this voltage
+#define BATTERY_CUTOFF      3.45    //Shut down below this voltage
+#define BATTERY_CUTOFF_SECS 10      //Seconds in a row below cutoff before shutting down
+#define BATTERY_FLASH_EVERY 5000    //ms between low battery flashes
+#define BATTERY_FLASH_LEN   400     //ms per flash
+
+unsigned long lastBatteryRead = 0;
+int batteryRaw = 0;
+float uBatt = 0;
+int batteryLowSecs = 0;
+char buffer[8];
 
 void onImprovWiFiErrorCb(ImprovTypes::Error err)
 {
@@ -226,8 +240,10 @@ void setup() {
     pinMode(PIN_BLUE2, OUTPUT);
 
     setBothLEDs(LED_BLUE);
-    //Setup current-measuring pin - Commented out for users without batteries
-    // pinMode(A0, INPUT);
+#ifdef BATTERY_MONITOR
+    //Setup battery voltage pin
+    pinMode(A0, INPUT);
+#endif
 
     //Start Serial
     Serial.begin(115200);
@@ -335,6 +351,8 @@ void loop() {
         improv.handleByte(readByte);
     }
 
+    batteryLoop();
+
     switch (state) {
         case STATE_CONNECTING_TO_WIFI:
             if (WiFi.status() == WL_CONNECTED) {
@@ -421,11 +439,12 @@ void loop() {
             tallyServer.runLoop();
 
             //Set LED and Neopixel colors accordingly
-            int color = getLedColor(settings.tallyModeLED1, settings.tallyNo);
+            //Flash yellow instead of the tally color if the battery is low
+            int color = batteryWarning() ? LED_YELLOW : getLedColor(settings.tallyModeLED1, settings.tallyNo);
             setLED1(color);
             setSTRIP(color);
 
-            color = getLedColor(settings.tallyModeLED2, settings.tallyNo);
+            color = batteryWarning() ? LED_YELLOW : getLedColor(settings.tallyModeLED2, settings.tallyNo);
             setLED2(color);
 
 #ifndef TALLY_TEST_SERVER
@@ -440,8 +459,6 @@ void loop() {
             }
 #endif
 
-            //Commented out for userst without batteries - Also timer is not done properly
-            // batteryLoop();
             break;
     }
 
@@ -731,10 +748,13 @@ void handleRoot() {
     html += "</td></tr><tr><td><br></td></tr><tr><td>Signal strength:</td><td colspan=\"2\">";
     html += WiFi.RSSI();
     html += " dBm</td></tr>";
-    //Commented out for users without batteries
-    // html += "<tr><td><br></td></tr><tr><td>Battery voltage:</td><td colspan=\"2\">";
-    // html += dtostrf(uBatt, 0, 3, buffer);
-    // html += " V</td></tr>";
+#ifdef BATTERY_MONITOR
+    html += "<tr><td><br></td></tr><tr><td>Battery voltage:</td><td colspan=\"2\">";
+    html += dtostrf(uBatt, 0, 3, buffer);
+    html += " V (raw ";
+    html += batteryRaw;
+    html += ")</td></tr>";
+#endif
     html += "<tr><td>Static IP:</td><td colspan=\"2\">";
     html += settings.staticIP == true ? "True" : "False";
     html += "</td></tr><tr><td>" +
@@ -990,36 +1010,44 @@ String getSSID() {
 #endif
 }
 
-//Commented out for users without batteries - Also timer is not done properly
-//Main loop for things that should work every second
-// void batteryLoop() {
-//     if (secLoop >= 400) {
-//         //Get and calculate battery current
-//         int raw = analogRead(A0);
-//         uBatt = (double)raw / 1023 * 4.2;
+//Battery monitoring: measure voltage once per second, shut down if empty
+void batteryLoop() {
+#ifdef BATTERY_MONITOR
+    unsigned long now = millis();
+    if (now - lastBatteryRead < 1000) {
+        return;
+    }
+    lastBatteryRead = now;
 
-//         //Set back status LED after one second to working LED_BLUE if it was changed by anything
-//         if (lowLedOn) {
-//             setStatusLED(LED_ORANGE);
-//             lowLedOn = false;
-//         }
+    batteryRaw = analogRead(A0);
+    float u = (float)batteryRaw / 1023 * BATTERY_FACTOR;
 
-//         //Blink every 5 seconds for one second if battery current is under 3.6V
-//         if (lowLedCount >= 5 && uBatt <= 3.600) {
-//             setStatusLED(LED_YELLOW);
-//             lowLedOn = true;
-//             lowLedCount = 0;
-//         }
-//         lowLedCount++;
+    //Smooth the noisy ADC reading
+    uBatt = uBatt < BATTERY_MIN_VALID ? u : uBatt * 0.8 + u * 0.2;
 
-//        //Turn stripes of and put ESP to deepsleep if battery is too low
-//        if(uBatt <= 3.499) {
-//            setSTRIP(LED_OFF);
-//            setStatusLED(LED_OFF);
-//            ESP.deepSleep(0, WAKE_NO_RFCAL);
-//        }
+    //Turn everything off and put ESP to deepsleep if battery is too low for several seconds
+    if (uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_CUTOFF) {
+        batteryLowSecs++;
+        if (batteryLowSecs >= BATTERY_CUTOFF_SECS) {
+            Serial.println("------------------------");
+            Serial.println("Battery empty, going to deepsleep");
+            setBothLEDs(LED_OFF);
+            setSTRIP(LED_OFF);
+            setStatusLED(LED_OFF);
+            FastLED.show();
+            ESP.deepSleep(0, WAKE_NO_RFCAL);
+        }
+    } else {
+        batteryLowSecs = 0;
+    }
+#endif
+}
 
-//         secLoop = 0;
-//     }
-//     secLoop++;
-// }
+//True while the low battery flash should be shown
+bool batteryWarning() {
+#ifdef BATTERY_MONITOR
+    return uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_WARN && millis() % BATTERY_FLASH_EVERY < BATTERY_FLASH_LEN;
+#else
+    return false;
+#endif
+}
