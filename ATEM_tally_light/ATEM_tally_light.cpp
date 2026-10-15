@@ -299,7 +299,7 @@ void setup() {
     FastLED.setBrightness(settings.neopixelBrightness);
 
     //Show each color for a second at startup, to check that all LED channels work
-    const uint8_t testColors[] = {LED_RED, LED_GREEN, LED_BLUE, LED_WHITE};
+    const uint8_t testColors[] = {LED_RED, LED_GREEN, LED_BLUE, LED_YELLOW, LED_WHITE};
     for (uint8_t color : testColors) {
         setBothLEDs(color);
         setSTRIP(color);
