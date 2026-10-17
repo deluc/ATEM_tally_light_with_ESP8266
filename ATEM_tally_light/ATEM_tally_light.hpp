@@ -84,3 +84,21 @@ int batteryMinutesLeft();
 
 //Small info icon that shows an explanation on hover or click
 String infoIcon(String text);
+
+//Remaining runtime as text, e.g. "~2 h 10 min"
+String formatMinutesLeft(int minutesLeft);
+
+//Send own battery status to the master and receive the reports of the other tallies
+void batteryReportLoop();
+
+//Store a battery report in the format "TLB1;name;voltage;low;minutesLeft"
+void handleBatteryReport(char *packet);
+
+//One row of the battery overview with a colored status dot
+String batteryOverviewRow(String name, float u, bool low, int minutesLeft, long secondsAgo);
+
+//Battery overview of this tally and all tallies reporting to it
+String batteryOverviewHtml();
+
+//Battery overview for the automatic refresh on the web page
+void handleBattery();

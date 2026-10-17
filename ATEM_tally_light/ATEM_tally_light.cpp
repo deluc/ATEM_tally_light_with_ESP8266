@@ -201,6 +201,7 @@ uint8_t readByte;
 //Build with -D NO_BATTERY_MONITOR to disable
 #if !defined(ESP32) && !defined(NO_BATTERY_MONITOR)
 #define BATTERY_MONITOR
+#include <WiFiUdp.h>
 #endif
 #ifndef BATTERY_FACTOR
 #define BATTERY_FACTOR      4.5     //Voltage at raw value 1023 - calibrate with a multimeter
@@ -229,6 +230,27 @@ int batteryTrendCount = 0;
 int batteryTrendIndex = 0;
 float batteryMinuteSum = 0;
 int batteryMinuteSamples = 0;
+
+//Battery overview: every tally reports its battery to the switcher IP (the master tally), which shows all of them
+#define BATTERY_REPORT_PORT    3334    //UDP port for battery reports
+#define BATTERY_REPORT_EVERY   10000   //ms between battery reports
+#define BATTERY_REPORT_TIMEOUT 30000   //ms without report before a tally is shown as offline
+#define BATTERY_REPORTS_MAX    16      //Max number of tallies in the overview
+#define BATTERY_URGENT         3.5     //Shown red in the overview below this voltage
+
+#ifdef BATTERY_MONITOR
+struct BatteryReport {
+    char name[32];
+    float u;
+    bool low;
+    int minutesLeft;
+    unsigned long lastSeen;
+};
+BatteryReport batteryReports[BATTERY_REPORTS_MAX];
+int batteryReportCount = 0;
+unsigned long lastBatteryReport = 0;
+WiFiUDP batteryUdp;
+#endif
 
 void onImprovWiFiErrorCb(ImprovTypes::Error err)
 {
@@ -340,6 +362,10 @@ void setup() {
     // Initialize and begin HTTP server for handeling the web interface
     server.on("/", handleRoot);
     server.on("/save", handleSave);
+#ifdef BATTERY_MONITOR
+    server.on("/battery", handleBattery);
+    batteryUdp.begin(BATTERY_REPORT_PORT);
+#endif
     server.onNotFound(handleNotFound);
     server.begin();
 
@@ -376,6 +402,9 @@ void loop() {
     }
 
     batteryLoop();
+#ifdef BATTERY_MONITOR
+    batteryReportLoop();
+#endif
 
     switch (state) {
         case STATE_CONNECTING_TO_WIFI:
@@ -805,22 +834,17 @@ void handleRoot() {
         html += infoIcon((String)"Estimated from the battery voltage using a typical Li-ion discharge curve. 0 % means the automatic shutdown at " + BATTERY_CUTOFF + " V. The voltage drops while the LEDs are bright, so the value can jump a bit.");
         html += "</td></tr><tr><td>Remaining runtime:</td><td colspan=\"2\">";
         int minutesLeft = batteryMinutesLeft();
-        if (minutesLeft == -1) {
-            html += "Calculating...";
-        } else if (minutesLeft == -2) {
-            html += "Not discharging";
-        } else {
-            html += "~";
-            if (minutesLeft >= 60) {
-                html += minutesLeft / 60;
-                html += " h ";
-            }
-            html += minutesLeft % 60;
-            html += " min (estimated)";
+        html += formatMinutesLeft(minutesLeft);
+        if (minutesLeft >= 0) {
+            html += " (estimated)";
         }
         html += infoIcon((String)"Estimated from how fast the battery level dropped during the last " + BATTERY_TREND_MINS + " minutes, extrapolated until the automatic shutdown. Needs " + BATTERY_TREND_MIN + " minutes on battery before the first estimate. Program, preview and off use different amounts of power, so this is only a rough guide.");
         html += "</td></tr>";
     }
+    //Overview of all tallies reporting to this one, refreshed every 10 seconds
+    html += "<tr><td colspan=\"3\"><div id=\"bat\">";
+    html += batteryOverviewHtml();
+    html += "</div><script>setInterval(function(){fetch('/battery').then(function(r){return r.text()}).then(function(t){document.getElementById('bat').innerHTML=t})},10000)</script></td></tr>";
 #endif
     html += "<tr><td>Static IP:</td><td colspan=\"2\">";
     html += settings.staticIP == true ? "True" : "False";
@@ -1188,6 +1212,118 @@ int batteryMinutesLeft() {
         return -2;
     }
     return batteryTrend[newest] / dropPerMinute;
+}
+
+//Remaining runtime as text, e.g. "~2 h 10 min"
+String formatMinutesLeft(int minutesLeft) {
+    if (minutesLeft == -1) {
+        return "Calculating...";
+    } else if (minutesLeft == -2) {
+        return "Not discharging";
+    }
+    String text = "~";
+    if (minutesLeft >= 60) {
+        text += minutesLeft / 60;
+        text += " h ";
+    }
+    text += minutesLeft % 60;
+    text += " min";
+    return text;
+}
+
+//Send own battery status to the master and receive the reports of the other tallies
+void batteryReportLoop() {
+    if (WiFi.status() != WL_CONNECTED) {
+        return;
+    }
+
+    while (batteryUdp.parsePacket() > 0) {
+        char packet[64];
+        int len = batteryUdp.read(packet, sizeof(packet) - 1);
+        packet[len > 0 ? len : 0] = 0;
+        handleBatteryReport(packet);
+    }
+
+    unsigned long now = millis();
+    if (now - lastBatteryReport >= BATTERY_REPORT_EVERY) {
+        lastBatteryReport = now;
+        batteryUdp.beginPacket(settings.switcherIP, BATTERY_REPORT_PORT);
+        batteryUdp.print((String)"TLB1;" + settings.tallyName + ";" + String(uBatt, 3) + ";" + (batteryLow ? 1 : 0) + ";" + batteryMinutesLeft());
+        batteryUdp.endPacket();
+    }
+}
+
+//Store a battery report in the format "TLB1;name;voltage;low;minutesLeft"
+void handleBatteryReport(char *packet) {
+    if (strncmp(packet, "TLB1;", 5) != 0) {
+        return;
+    }
+    char *name = strtok(packet + 5, ";");
+    char *u = strtok(NULL, ";");
+    char *low = strtok(NULL, ";");
+    char *minutesLeft = strtok(NULL, ";");
+    if (minutesLeft == NULL || strcmp(name, settings.tallyName) == 0) {
+        return;
+    }
+
+    int i = 0;
+    while (i < batteryReportCount && strcmp(batteryReports[i].name, name) != 0) {
+        i++;
+    }
+    if (i == batteryReportCount) {
+        if (batteryReportCount >= BATTERY_REPORTS_MAX) {
+            return;
+        }
+        batteryReportCount++;
+        strncpy(batteryReports[i].name, name, sizeof(batteryReports[i].name) - 1);
+        batteryReports[i].name[sizeof(batteryReports[i].name) - 1] = 0;
+    }
+    batteryReports[i].u = atof(u);
+    batteryReports[i].low = atoi(low) == 1;
+    batteryReports[i].minutesLeft = atoi(minutesLeft);
+    batteryReports[i].lastSeen = millis();
+}
+
+//One row of the battery overview with a colored status dot
+String batteryOverviewRow(String name, float u, bool low, int minutesLeft, long secondsAgo) {
+    String color;
+    String status;
+    if (secondsAgo * 1000 > BATTERY_REPORT_TIMEOUT) {
+        color = "#999999";
+        status = (String)"offline (last seen " + (secondsAgo < 120 ? (String)secondsAgo + " s" : (String)(secondsAgo / 60) + " min") + " ago)";
+    } else if (u < BATTERY_MIN_VALID) {
+        color = "#999999";
+        status = "no battery reading";
+    } else {
+        color = u <= BATTERY_URGENT ? "#dd0000" : low ? "#e6b800" : "#00aa00";
+        status = dtostrf(u, 0, 2, buffer);
+        status += " V</td><td>~";
+        status += (int)(batteryPercent(u) + 0.5);
+        status += " %</td><td>";
+        status += formatMinutesLeft(minutesLeft);
+    }
+    return "<tr><td><span style=\"color:" + color + ";font-size:1.3em\">&#9679;</span> " + name + "</td><td>" + status + "</td></tr>";
+}
+
+//Battery overview of this tally and all tallies reporting to it. Empty if no other tally reports here
+String batteryOverviewHtml() {
+    if (batteryReportCount == 0) {
+        return "";
+    }
+    String html = "<br><b>Battery status of all tallies</b>";
+    html += infoIcon((String)"All tallies send their battery status to their switcher IP every " + (BATTERY_REPORT_EVERY / 1000) + " seconds, so the master tally shows all of them. Green: battery OK. Yellow: replace soon (below " + BATTERY_WARN + " V, the tally flashes yellow). Red: replace now (below " + BATTERY_URGENT + " V, shutdown at " + BATTERY_CUTOFF + " V). Grey: no report for " + (BATTERY_REPORT_TIMEOUT / 1000) + " seconds. Level and runtime are estimates.");
+    html += "<table cellpadding=\"2\">";
+    html += batteryOverviewRow(settings.tallyName, uBatt, batteryLow, batteryMinutesLeft(), 0);
+    for (int i = 0; i < batteryReportCount; i++) {
+        BatteryReport &r = batteryReports[i];
+        html += batteryOverviewRow(r.name, r.u, r.low, r.minutesLeft, (millis() - r.lastSeen) / 1000);
+    }
+    return html + "</table>";
+}
+
+//Battery overview for the automatic refresh on the web page
+void handleBattery() {
+    server.send(200, "text/html", batteryOverviewHtml());
 }
 
 //Small info icon that shows an explanation on hover or click
