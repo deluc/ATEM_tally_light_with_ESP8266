@@ -207,6 +207,7 @@ uint8_t readByte;
 #endif
 #define BATTERY_MIN_VALID   2.5     //Below this J2 is probably open, so the reading is ignored
 #define BATTERY_WARN        3.6     //Flash yellow below this voltage
+#define BATTERY_WARN_OFF    3.7     //Stop flashing only above this voltage (e.g. when charging)
 #define BATTERY_CUTOFF      3.45    //Shut down below this voltage
 #define BATTERY_CUTOFF_SECS 10      //Seconds in a row below cutoff before shutting down
 #define BATTERY_FLASH_EVERY 5000    //ms between low battery flashes
@@ -218,6 +219,7 @@ unsigned long lastBatteryRead = 0;
 int batteryRaw = 0;
 float uBatt = 0;
 int batteryLowSecs = 0;
+bool batteryLow = false;
 bool batteryFlashOn = false;
 char buffer[8];
 
@@ -1090,6 +1092,13 @@ void batteryLoop() {
     //Smooth the noisy ADC reading
     uBatt = uBatt < BATTERY_MIN_VALID ? u : uBatt * 0.8 + u * 0.2;
 
+    //Low battery warning with hysteresis, so it doesn't turn on and off when the voltage is around the limit
+    if (uBatt < BATTERY_MIN_VALID || uBatt > BATTERY_WARN_OFF) {
+        batteryLow = false;
+    } else if (uBatt <= BATTERY_WARN) {
+        batteryLow = true;
+    }
+
     //Store the battery level averaged over each minute for the runtime estimate
     if (uBatt >= BATTERY_MIN_VALID) {
         batteryMinuteSum += batteryPercent(uBatt);
@@ -1142,7 +1151,7 @@ void batteryShutdown() {
 //True while the low battery flash should be shown
 bool batteryWarning() {
 #ifdef BATTERY_MONITOR
-    return uBatt >= BATTERY_MIN_VALID && uBatt <= BATTERY_WARN && millis() % BATTERY_FLASH_EVERY < BATTERY_FLASH_LEN;
+    return batteryLow && millis() % BATTERY_FLASH_EVERY < BATTERY_FLASH_LEN;
 #else
     return false;
 #endif
